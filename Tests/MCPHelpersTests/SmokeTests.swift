@@ -12,6 +12,6 @@ import Testing
 struct SmokeTests {
     @Test("MCPHelpers.version matches Package.swift")
     func versionMatchesPackage() {
-        #expect(MCPHelpers.version == "0.1.0")
+        #expect(MCPHelpers.version == "0.2.0")
     }
 }
