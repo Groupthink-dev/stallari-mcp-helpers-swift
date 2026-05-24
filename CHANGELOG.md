@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-24
+
+DD-338 Phase B Swift sibling — adds the S-AUD-001 audit-surface honesty linter to the `MCPHelpers` package + a `stallari-mcp-lint` console-script executable target. Sister to the Python sibling [`stallari_mcp_helpers.lint`](https://pypi.org/project/stallari-mcp-helpers/) and the TS sibling at the same JSON output shape (byte-parity after canonical-JSON normalisation).
+
+### Added
+
+- `Sources/MCPHelpers/Lint.swift` — SwiftSyntax-based static linter. Walks a blade-mcp Swift source tree, identifies tool registrations across three patterns (switch-dispatch ToolRegistry, FastMCP-style decorator, imperative `server.addTool(name:) { ... }`), and verifies each tool's emission graph reaches a canonical emit name (`appendMeta` or `makeResultWithMeta`) within 3 wrapper hops.
+- Public API surface: `lintBlade(bladeSourceRoot:catalogEntry:)`, `LintResult`, `ToolVerdict`, `AuditSurfaceVerdict`, `LintSummary`, constants `lintRuleID = "S-AUD-001"`, `canonicalEmitNames`, `maxResolutionDepth = 3`.
+- `LintResult.canonicalJSON()` — renders the verdict envelope as JSON byte-identical to the Python sister's `json.dumps(result.to_dict(), indent=2, sort_keys=True)`. Built on `JSONSerialization` with `.sortedKeys` + `.prettyPrinted` then normalised to Python-style key/value separator (`": "` not `" : "`) and bare-`/` (not `\/`). Hand-assembled rather than `JSONEncoder.encode(self)` because Foundation's `KeyedEncodingContainer` key emission order is implementation-defined — see `[[feedback_swift_jsonencoder_key_order]]`.
+- `Sources/StallariMCPLintCLI/main.swift` — `stallari-mcp-lint` executable target. CLI: `stallari-mcp-lint <blade-source-root> --catalog <catalog.json> [--output <sidecar.json>] [--strict]`. `--strict` exits non-zero (1) on any over-declared/under-declared verdict (indeterminate does NOT trip strict mode — explicit "lint can't tell" rather than "lint says wrong").
+- `Tests/MCPHelpersTests/LintTests.swift` — 14 Swift Testing cases (L1–L11 spec mirror + FastMCP decorator + addTool + garbage-file resilience + public-constants guard). Synthesises tiny on-disk blade fixtures per case.
+
+### Changed
+
+- `MCPHelpers.version` bumped to `"0.2.0"`.
+- `Package.swift` — adds `swift-syntax` SPM dependency (pinned `from: "600.0.0"` matching stallari-harness Tools/source-lint) and `stallari-mcp-lint` executable product/target.
+
+### Verified
+
+- 31/31 tests pass (`swift test`).
+- Smoke against `apple-notes-blade-mcp` (5 tools) — 0 over-declared, 0 under-declared, 5 match.
+- Smoke against `apple-mail-blade-mcp` (11 tools) — 0 over-declared, 0 under-declared, 11 match.
+
 ## [0.1.0] - 2026-05-24
 
 Initial release. Sister package to [stallari-mcp-helpers (Python)](https://pypi.org/project/stallari-mcp-helpers/) and [stallari-mcp-helpers (TypeScript)](https://www.npmjs.com/package/stallari-mcp-helpers) — same wire contract, same `_meta` envelope shape, idiomatic Swift API.
