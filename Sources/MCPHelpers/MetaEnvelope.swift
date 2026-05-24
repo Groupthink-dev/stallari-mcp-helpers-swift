@@ -3,17 +3,26 @@
 // `audit_envelope.meta_envelope` and the TypeScript `MetaEnvelope` interface
 // at full wire-shape parity.
 //
-// Wire shape locked per DD-338 Phase A.1 contract; envelope key emission
-// order is fixed for cross-language byte parity with the Python canonical:
+// Wire shape locked per DD-338 Phase A.1 + Phase D.1 contract. Envelope key
+// emission order (locked across read + write tier):
 //   matched_total, returned, filtered_by, latency_ms, redactions,
-//   next_cursor, [error_notes]
+//   next_cursor, rows_affected, target_id, write_durability,
+//   response_timestamp, error_notes
 //
-// Field-presence rules:
-//   - `matchedTotal`, `returned`, `latencyMs`, `filteredBy`, `redactions`,
-//     `nextCursor` — REQUIRED, always present in output. `filteredBy` and
-//     `redactions` default to `[]`; `nextCursor` defaults to JSON `null`.
-//   - `errorNotes` — OPTIONAL, omitted from output when nil or empty (per
-//     Convention #22 graceful degradation; matches Python/TS sisters).
+// Field-presence rules (DD-338 D.1 — relaxed read-tier + new write-tier):
+//   - `latencyMs`, `filteredBy`, `redactions` — always present in output.
+//     `filteredBy` and `redactions` default to `[]`.
+//   - `nextCursor` — always present in output (encodes as JSON `null` when
+//     nil; matches Python/TS sister discipline).
+//   - `matchedTotal`, `returned` — OPTIONAL since D.1 (omit-when-nil). Pure
+//     write-tier tool calls omit both; read-tier callers continue to pass
+//     concrete values.
+//   - `errorNotes` — OPTIONAL, omit when nil or empty (Convention #22).
+//   - `rowsAffected`, `targetId`, `writeDurability`, `responseTimestamp` —
+//     OPTIONAL write-tier fields (DD-338 D.1). Omit-when-nil. Canonical
+//     `writeDurability` values: "edge" | "central" | "replicated" (typed as
+//     plain `String?` for forward-compatibility — additional vocab terms
+//     added later won't break decoding).
 //
 // JSON encoding uses snake_case keys via the `CodingKeys` enum below.
 //
@@ -24,30 +33,38 @@
 // Swift 6.0 Apple Foundation); only `.sortedKeys` is stable, and that
 // produces alphabetical order — not the cross-language locked order.
 // The hand-rolled `encode(to:)` below still produces *valid* snake_case
-// JSON in the locked control-flow order (with `error_notes` omitted when
-// nil/empty and `next_cursor` always emitted including as JSON `null`).
-// It is exercised by `Codable` round-trips (encode → decode) and any
-// consumer who calls `JSONEncoder().encode(envelope)` directly, but it
-// is NOT the path that produces the canonical `_meta:` line.
+// JSON in the locked control-flow order (with omit-when-nil discipline
+// honoured for every optional field, and `next_cursor` always emitted
+// including as JSON `null`). It is exercised by `Codable` round-trips
+// (encode → decode) and any consumer who calls `JSONEncoder().encode(envelope)`
+// directly, but it is NOT the path that produces the canonical `_meta:` line.
 
 import Foundation
 
 public struct MetaEnvelope: Sendable, Equatable, Codable {
-    public let matchedTotal: Int
-    public let returned: Int
+    public let matchedTotal: Int?
+    public let returned: Int?
     public let latencyMs: Int
     public let filteredBy: [String]
     public let redactions: [String]
     public let nextCursor: String?
+    public let rowsAffected: Int?
+    public let targetId: String?
+    public let writeDurability: String?
+    public let responseTimestamp: String?
     public let errorNotes: [String]?
 
     public init(
-        matchedTotal: Int,
-        returned: Int,
+        matchedTotal: Int? = nil,
+        returned: Int? = nil,
         latencyMs: Int,
-        filteredBy: [String],
+        filteredBy: [String] = [],
         redactions: [String] = [],
         nextCursor: String? = nil,
+        rowsAffected: Int? = nil,
+        targetId: String? = nil,
+        writeDurability: String? = nil,
+        responseTimestamp: String? = nil,
         errorNotes: [String]? = nil
     ) {
         self.matchedTotal = matchedTotal
@@ -56,6 +73,10 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
         self.filteredBy = filteredBy
         self.redactions = redactions
         self.nextCursor = nextCursor
+        self.rowsAffected = rowsAffected
+        self.targetId = targetId
+        self.writeDurability = writeDurability
+        self.responseTimestamp = responseTimestamp
         self.errorNotes = errorNotes
     }
 
@@ -66,30 +87,43 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
         case latencyMs = "latency_ms"
         case redactions
         case nextCursor = "next_cursor"
+        case rowsAffected = "rows_affected"
+        case targetId = "target_id"
+        case writeDurability = "write_durability"
+        case responseTimestamp = "response_timestamp"
         case errorNotes = "error_notes"
     }
 
     // Hand-rolled encoder locks key emission order to the cross-language
-    // contract: matched_total, returned, filtered_by, latency_ms,
-    // redactions, next_cursor, [error_notes]. Swift's JSONEncoder without
-    // `.sortedKeys` follows CodingKeys declaration order in current Swift
-    // versions, but the behaviour is implementation-defined — locking it
-    // here removes that fragility.
+    // contract:
+    //   matched_total, returned, filtered_by, latency_ms, redactions,
+    //   next_cursor, rows_affected, target_id, write_durability,
+    //   response_timestamp, error_notes
+    //
+    // Omit-when-nil discipline matches `formatMetaLine` exactly. Note that
+    // the canonical `_meta:` line is produced by `formatMetaLine` (a
+    // hand-assembled string concatenation) — this `encode(to:)`
+    // implementation is exercised only by `Codable` round-trips and direct
+    // `JSONEncoder().encode(envelope)` calls and is NOT byte-equal to the
+    // canonical line (Foundation re-orders keys, adds spaces around colons,
+    // escapes forward slashes — see Encoder.swift implementation note).
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(matchedTotal, forKey: .matchedTotal)
-        try container.encode(returned, forKey: .returned)
+        try container.encodeIfPresent(matchedTotal, forKey: .matchedTotal)
+        try container.encodeIfPresent(returned, forKey: .returned)
         try container.encode(filteredBy, forKey: .filteredBy)
         try container.encode(latencyMs, forKey: .latencyMs)
         try container.encode(redactions, forKey: .redactions)
-        // `next_cursor` is REQUIRED and encodes as JSON `null` when nil.
-        // `encodeIfPresent` would omit the key; use the explicit encode
-        // overload that preserves null.
+        // `next_cursor` is always present; encode null when nil.
         if let nextCursor {
             try container.encode(nextCursor, forKey: .nextCursor)
         } else {
             try container.encodeNil(forKey: .nextCursor)
         }
+        try container.encodeIfPresent(rowsAffected, forKey: .rowsAffected)
+        try container.encodeIfPresent(targetId, forKey: .targetId)
+        try container.encodeIfPresent(writeDurability, forKey: .writeDurability)
+        try container.encodeIfPresent(responseTimestamp, forKey: .responseTimestamp)
         // `error_notes` is OPTIONAL — omit entirely when nil or empty.
         if let errorNotes, !errorNotes.isEmpty {
             try container.encode(errorNotes, forKey: .errorNotes)
