@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-24
+
+DD-338 Phase D.1 Swift sibling — additive extension of `MetaEnvelope` for write-tier audit fields. Sister to the Python sibling [`stallari-mcp-helpers` 0.3.0](https://pypi.org/project/stallari-mcp-helpers/) and the TypeScript sibling at the same JSON output shape (byte-parity confirmed via shared kitchen-sink fixture).
+
+### Added
+
+- `MetaEnvelope` write-tier optional fields (all omit-when-nil):
+  - `rowsAffected: Int?` (wire: `rows_affected`) — rows / nodes / records affected by the write.
+  - `targetId: String?` (wire: `target_id`) — server-side identity of the primary target of the write (note ID, row PK, etc.).
+  - `writeDurability: String?` (wire: `write_durability`) — canonical vocab `"edge" | "central" | "replicated"`. Typed as plain `String?` for forward-compat with vocab extensions.
+  - `responseTimestamp: String?` (wire: `response_timestamp`) — ISO8601 timestamp of the write commit.
+- `formatMetaLine` extended with locked write-tier key emission order. Canonical key order (read + write):
+  `matched_total, returned, filtered_by, latency_ms, redactions, next_cursor, rows_affected, target_id, write_durability, response_timestamp, error_notes`
+- `Tests/MCPHelpersTests/MetaTests.swift` — extended to 26 Swift Testing cases. Adds per-field presence/absence cases, write-tier-only envelope, kitchen-sink read+write envelope, key-order substring index assertion, cross-language byte-parity fixture extended for D.1, regex contract extended for D.1, Codable round-trip extended for D.1, and a backwards-compatibility case mirroring the exact v0.2.0 apple-notes/apple-mail call shape.
+
+### Changed
+
+- `MetaEnvelope.matchedTotal` and `MetaEnvelope.returned` relaxed from required `Int` to optional `Int?` (omit-when-nil). Pure write-tier callers omit both; read-tier callers continue to pass concrete values. Backwards-compatible — existing call sites that pass keyword arguments compile unchanged.
+- `Encoder.swift` internal scalar helpers (`encodeJSONString`, `encodeStringArray`) now post-process Foundation's default `\/` slash-escape back to bare `/` for cross-language byte parity with the Python + TypeScript sisters. v0.2.0 fixtures never exercised slash-containing strings; D.1 timestamps and arbitrary write-tier IDs may.
+- `MCPHelpers.version` bumped to `"0.3.0"`.
+
+### Notes
+
+- Backwards-compatible — `apple-notes-blade-mcp` and `apple-mail-blade-mcp` consumer call sites unchanged; old read-tier envelope bytes identical to v0.2.0 output (`backwardsCompatibility` test pins this).
+- Convention #23 reader-audit scope on this phase: `apple-notes-blade-mcp`, `apple-mail-blade-mcp`, and the daemon-side `_meta:` assembler regex consumer in stallari-harness/stallari-vault. None of these readers parse beyond the canonical regex envelope today; the additive D.1 fields are transparent to all current consumers.
+
 ## [0.2.0] - 2026-05-24
 
 DD-338 Phase B Swift sibling — adds the S-AUD-001 audit-surface honesty linter to the `MCPHelpers` package + a `stallari-mcp-lint` console-script executable target. Sister to the Python sibling [`stallari_mcp_helpers.lint`](https://pypi.org/project/stallari-mcp-helpers/) and the TS sibling at the same JSON output shape (byte-parity after canonical-JSON normalisation).
