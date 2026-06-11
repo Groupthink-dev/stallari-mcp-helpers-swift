@@ -22,9 +22,10 @@ All three packages stay in lockstep on the wire shape — `meta_envelope(...)` i
 
 One small module:
 
-- **`MCPHelpers`** — renders the canonical `_meta: {...}` JSON-tail block the Stallari assembler lifts into its `ContextPacket.provenance` audit trail. Locked encoding: tight JSON separators, alphabetically-sorted `filtered_by`, required/optional field discipline matching the DD-338 wire contract.
+- **`MCPHelpers`** — renders the canonical `_meta: {...}` JSON-tail block the Stallari assembler lifts into its `ContextPacket.provenance` audit trail. Locked encoding: tight JSON separators, code-point-sorted `filtered_by` and `domain_hints` keys (raw Unicode scalar order, no normalisation — `codePointLess`, NOT Swift's default `String <`), required/optional field discipline matching the DD-338 wire contract (12 keys as of v0.4.0).
+- Plus the **canonical HTTP transport policy** (`Transport.swift`, v0.4.0 / AUD-04-08) — `resolveHTTPTransport` (refuse-to-serve when the token is absent, wildcard binds never permitted, non-loopback requires an exact-`"true"` opt-in) and `validateBearer` (constant-time bearer comparison; enforce on WebSocket upgrades too).
 
-This package does **not** ship MCP-server scaffolding, tool registration, HTTP/IPC, inference, or domain-attribution primitives. It's deliberately small.
+This package does **not** ship MCP-server scaffolding, tool registration, an HTTP server, inference, or domain-attribution primitives. It's deliberately small.
 
 ## Audience
 
@@ -120,29 +121,62 @@ Stallari's conformance harness verifies these claims against your actual tool be
 ## API reference
 
 ```swift
-public struct MetaEnvelope: Sendable {
-    public let matchedTotal: Int
-    public let returned: Int
+public struct MetaEnvelope: Sendable, Equatable, Codable {
+    public let matchedTotal: Int?            // optional since D.1, omit-when-nil
+    public let returned: Int?                // optional since D.1, omit-when-nil
     public let latencyMs: Int
-    public let filteredBy: [String]        // alphabetically sorted in output
-    public let redactions: [String]        // required, defaults to []
-    public let nextCursor: String?         // required, nil is valid
-    public let errorNotes: [String]?       // optional, omitted when nil or empty
+    public let filteredBy: [String]          // code-point sorted in output
+    public let redactions: [String]          // required, defaults to []
+    public let nextCursor: String?           // required, nil emits JSON null
+    public let rowsAffected: Int?            // write-tier, omit-when-nil
+    public let targetId: String?             // write-tier, omit-when-nil
+    public let writeDurability: String?      // "edge" | "central" | "replicated"
+    public let responseTimestamp: String?    // write-tier, omit-when-nil
+    public let errorNotes: [String]?         // omitted when nil or empty
+    public let domainHints: [String: String]? // v0.4.0; omitted when nil or
+                                              // empty; keys code-point sorted
 
     public init(
-        matchedTotal: Int,
-        returned: Int,
+        matchedTotal: Int? = nil,
+        returned: Int? = nil,
         latencyMs: Int,
-        filteredBy: [String],
+        filteredBy: [String] = [],
         redactions: [String] = [],
         nextCursor: String? = nil,
-        errorNotes: [String]? = nil
+        rowsAffected: Int? = nil,
+        targetId: String? = nil,
+        writeDurability: String? = nil,
+        responseTimestamp: String? = nil,
+        errorNotes: [String]? = nil,
+        domainHints: [String: String]? = nil
     )
 }
 
 public func formatMetaLine(_ meta: MetaEnvelope) throws -> String
 public func appendMeta(_ payload: String, _ metaLine: String) -> String
+
+// Locked cross-language collation (raw Unicode code-point order, no
+// normalisation — Swift's default `String <` diverges):
+public func codePointLess(_ lhs: String, _ rhs: String) -> Bool
+
+// HTTP transport policy (v0.4.0, AUD-04-08 / AUD-04-31):
+public enum TransportPolicyError: Error, Equatable, CustomStringConvertible
+public struct HTTPTransportConfig: Sendable, Equatable {
+    public let host: String
+    public let port: Int
+    public let token: String
+}
+public func strictEnvBool(_ value: String?) -> Bool   // true ONLY for "true"
+public func resolveHTTPTransport(
+    envPrefix: String,
+    defaultPort: Int,
+    environment: [String: String]? = nil,
+    tokenVariable: String? = nil
+) throws -> HTTPTransportConfig
+public func validateBearer(authorizationHeader: String?, expectedToken: String) -> Bool
 ```
+
+Locked 12-key `_meta` emission order (v0.4.0): `matched_total, returned, filtered_by, latency_ms, redactions, next_cursor, rows_affected, target_id, write_durability, response_timestamp, error_notes, domain_hints`.
 
 ## Versioning
 

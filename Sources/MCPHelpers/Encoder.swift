@@ -32,10 +32,11 @@
 // uses — then we post-process value-level strings to unescape `\/` to
 // bare `/` (Foundation defaults to escaping it; the canonical does not).
 //
-// Locked emission order (read-tier + write-tier additions per DD-338 D.1):
+// Locked emission order (12 keys — read-tier + write-tier per DD-338 D.1
+// + `domain_hints` per v0.4.0 / AUD-04-12):
 //   matched_total, returned, filtered_by, latency_ms, redactions,
 //   next_cursor, rows_affected, target_id, write_durability,
-//   response_timestamp, error_notes
+//   response_timestamp, error_notes, domain_hints
 //
 // Field-presence rules (omit-when-nil discipline):
 //   - `latency_ms`, `filtered_by`, `redactions` — always emitted.
@@ -44,6 +45,15 @@
 //   - `rows_affected`, `target_id`, `write_durability`,
 //     `response_timestamp` — OPTIONAL write-tier, omit-when-nil (D.1).
 //   - `error_notes` — omit when nil or empty.
+//   - `domain_hints` — omit when nil or empty; keys sorted by Unicode
+//     code point (see `codePointLess`).
+//
+// COLLATION NOTE (AUD-04-12): all string sorting in the canonical line
+// (`filtered_by` elements, `domain_hints` keys) uses raw Unicode
+// code-point order with NO normalisation — Python `sorted()` semantics.
+// Swift's default `String <` applies Unicode-canonical ordering, which
+// diverges from the locked collation; hence the explicit scalar compare
+// in `codePointLess` below.
 
 import Foundation
 
@@ -54,11 +64,43 @@ public enum MCPHelpersEncoderError: Error, Equatable {
     case invalidJSON
 }
 
+/// Locked cross-language collation: lexicographic comparison over the raw
+/// Unicode scalar (code-point) values of the two strings, with NO
+/// normalisation. This matches Python's `sorted()` on `str` (which
+/// compares code points) and the explicit code-point comparator in the
+/// TypeScript sister (JS's default sort is UTF-16 code-UNIT order, which
+/// also diverges for non-BMP input — both sisters lock to code points).
+///
+/// Swift's default `String <` is NOT this: it applies Unicode-canonical
+/// ordering (and normalisation-aware comparison), which diverges from the
+/// locked collation for collation-hostile inputs (e.g. U+FFFD vs
+/// U+1F600-prefixed strings, precomposed vs decomposed accents). Hence
+/// this explicit scalar compare — use it for every sort that feeds the
+/// canonical `_meta:` line.
+public func codePointLess(_ lhs: String, _ rhs: String) -> Bool {
+    var l = lhs.unicodeScalars.makeIterator()
+    var r = rhs.unicodeScalars.makeIterator()
+    while true {
+        switch (l.next(), r.next()) {
+        case (nil, nil):
+            return false
+        case (nil, _):
+            return true
+        case (_, nil):
+            return false
+        case (let lv?, let rv?):
+            if lv.value != rv.value { return lv.value < rv.value }
+        }
+    }
+}
+
 /// Format a `_meta:` envelope line for appending to a tool payload.
 ///
 /// Single-line JSON; assembler regex `\n\n_meta: (\{.*\})$`. Sorts
-/// `filteredBy` alphabetically for byte-equality determinism across call
-/// sites that pass the same logical filter set in different orders.
+/// `filteredBy` by raw Unicode code point (`codePointLess` — the locked
+/// cross-language collation, NOT Swift's default `String <`) for
+/// byte-equality determinism across call sites that pass the same logical
+/// filter set in different orders.
 ///
 /// Field-presence rules (omit-when-nil discipline):
 ///   - `latency_ms`, `filtered_by`, `redactions`, `next_cursor` — always
@@ -68,13 +110,16 @@ public enum MCPHelpersEncoderError: Error, Equatable {
 ///   - `rows_affected`, `target_id`, `write_durability`,
 ///     `response_timestamp` — DD-338 D.1 write-tier; omit-when-nil.
 ///   - `error_notes` — omitted when nil or empty (Convention #22).
+///   - `domain_hints` — omitted when nil or empty (v0.4.0 / AUD-04-12);
+///     keys sorted by `codePointLess` when emitted.
 ///
-/// Key emission order matches the Python + TypeScript sister canonicals:
+/// Key emission order matches the Python + TypeScript sister canonicals
+/// (12 keys, v0.4.0):
 ///   matched_total, returned, filtered_by, latency_ms, redactions,
 ///   next_cursor, rows_affected, target_id, write_durability,
-///   response_timestamp, error_notes
+///   response_timestamp, error_notes, domain_hints
 public func formatMetaLine(_ meta: MetaEnvelope) throws -> String {
-    let sortedFilteredBy = meta.filteredBy.sorted()
+    let sortedFilteredBy = meta.filteredBy.sorted(by: codePointLess)
     let emitErrorNotes = (meta.errorNotes?.isEmpty == false)
 
     var parts: [String] = []
@@ -106,6 +151,18 @@ public func formatMetaLine(_ meta: MetaEnvelope) throws -> String {
     }
     if emitErrorNotes, let notes = meta.errorNotes {
         parts.append("\"error_notes\":\(try encodeStringArray(notes))")
+    }
+    if let domainHints = meta.domainHints, !domainHints.isEmpty {
+        // Hand-assemble the object so key order is the locked code-point
+        // collation (Foundation's dictionary encoding has no usable order).
+        let sortedKeys = domainHints.keys.sorted(by: codePointLess)
+        var pairs: [String] = []
+        pairs.reserveCapacity(sortedKeys.count)
+        for key in sortedKeys {
+            // Force-unwrap is safe — keys come from the dictionary itself.
+            pairs.append("\(try encodeJSONString(key)):\(try encodeJSONString(domainHints[key]!))")
+        }
+        parts.append("\"domain_hints\":{" + pairs.joined(separator: ",") + "}")
     }
     return "_meta: {" + parts.joined(separator: ",") + "}"
 }

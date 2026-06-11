@@ -3,11 +3,12 @@
 // `audit_envelope.meta_envelope` and the TypeScript `MetaEnvelope` interface
 // at full wire-shape parity.
 //
-// Wire shape locked per DD-338 Phase A.1 + Phase D.1 contract. Envelope key
+// Wire shape locked per DD-338 Phase A.1 + Phase D.1 contract, extended to
+// the 12-key v0.4.0 cross-language contract (AUD-04-12). Envelope key
 // emission order (locked across read + write tier):
 //   matched_total, returned, filtered_by, latency_ms, redactions,
 //   next_cursor, rows_affected, target_id, write_durability,
-//   response_timestamp, error_notes
+//   response_timestamp, error_notes, domain_hints
 //
 // Field-presence rules (DD-338 D.1 — relaxed read-tier + new write-tier):
 //   - `latencyMs`, `filteredBy`, `redactions` — always present in output.
@@ -23,6 +24,10 @@
 //     `writeDurability` values: "edge" | "central" | "replicated" (typed as
 //     plain `String?` for forward-compatibility — additional vocab terms
 //     added later won't break decoding).
+//   - `domainHints` — OPTIONAL (v0.4.0 / AUD-04-12). Omit entirely when nil
+//     or empty. When emitted, object keys are sorted by raw Unicode
+//     code-point value (Python `sorted()` semantics) — see the
+//     `codePointLess` comparator in `Encoder.swift`.
 //
 // JSON encoding uses snake_case keys via the `CodingKeys` enum below.
 //
@@ -53,6 +58,7 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
     public let writeDurability: String?
     public let responseTimestamp: String?
     public let errorNotes: [String]?
+    public let domainHints: [String: String]?
 
     public init(
         matchedTotal: Int? = nil,
@@ -65,7 +71,8 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
         targetId: String? = nil,
         writeDurability: String? = nil,
         responseTimestamp: String? = nil,
-        errorNotes: [String]? = nil
+        errorNotes: [String]? = nil,
+        domainHints: [String: String]? = nil
     ) {
         self.matchedTotal = matchedTotal
         self.returned = returned
@@ -78,6 +85,7 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
         self.writeDurability = writeDurability
         self.responseTimestamp = responseTimestamp
         self.errorNotes = errorNotes
+        self.domainHints = domainHints
     }
 
     enum CodingKeys: String, CodingKey {
@@ -92,13 +100,14 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
         case writeDurability = "write_durability"
         case responseTimestamp = "response_timestamp"
         case errorNotes = "error_notes"
+        case domainHints = "domain_hints"
     }
 
     // Hand-rolled encoder locks key emission order to the cross-language
-    // contract:
+    // contract (12 keys, v0.4.0):
     //   matched_total, returned, filtered_by, latency_ms, redactions,
     //   next_cursor, rows_affected, target_id, write_durability,
-    //   response_timestamp, error_notes
+    //   response_timestamp, error_notes, domain_hints
     //
     // Omit-when-nil discipline matches `formatMetaLine` exactly. Note that
     // the canonical `_meta:` line is produced by `formatMetaLine` (a
@@ -127,6 +136,15 @@ public struct MetaEnvelope: Sendable, Equatable, Codable {
         // `error_notes` is OPTIONAL — omit entirely when nil or empty.
         if let errorNotes, !errorNotes.isEmpty {
             try container.encode(errorNotes, forKey: .errorNotes)
+        }
+        // `domain_hints` is OPTIONAL — omit entirely when nil or empty
+        // (same discipline as `error_notes`). Note: the canonical
+        // `formatMetaLine` path emits its keys sorted by Unicode
+        // code point; this Codable path delegates to Foundation's
+        // dictionary encoding (key order unspecified) and is exercised
+        // only by round-trips.
+        if let domainHints, !domainHints.isEmpty {
+            try container.encode(domainHints, forKey: .domainHints)
         }
     }
 }

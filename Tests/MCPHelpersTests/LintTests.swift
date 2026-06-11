@@ -59,7 +59,10 @@ private func catalog(_ blade: String, _ tools: [(name: String, audit: String)]) 
 @Suite("Lint — S-AUD-001 audit-surface honesty")
 struct LintTests {
 
-    // L1 — switch-dispatch + handler.handle() calls makeResultWithMeta → match
+    // L1 — switch-dispatch + handler.handle() calls a blade-local
+    // makeResultWithMeta wrapper whose body reaches appendMeta → match.
+    // Since v0.4.0 (AUD-04-13) the wrapper is resolved by BODY, not
+    // trusted by bare name — the fixture therefore defines it.
     @Test("L1 — switch-dispatch handler calls makeResultWithMeta (structured) → match")
     func l1_switchDispatchStructuredMatch() throws {
         let fx = try BladeFixture()
@@ -77,10 +80,14 @@ struct LintTests {
         }
         """)
         _ = try fx.write(file: "Sources/Blade/Tools/ListFoldersHandler.swift", """
+        func makeResultWithMeta(payload: Int, meta: Int) -> Int {
+            _ = appendMeta("body", "_meta: {}")
+            return payload
+        }
         struct ListFoldersHandler {
             func handle() async -> Int {
                 let payload = 0
-                let meta = MetaEnvelope()
+                let meta = 0
                 return makeResultWithMeta(payload: payload, meta: meta)
             }
         }
@@ -217,6 +224,10 @@ struct LintTests {
         }
         """)
         _ = try fx.write(file: "Sources/Blade/Tools/UndersoldHandler.swift", """
+        func makeResultWithMeta(payload: Int, meta: Int) -> Int {
+            _ = appendMeta("body", "_meta: {}")
+            return payload
+        }
         struct UndersoldHandler {
             func handle() async -> Int {
                 return makeResultWithMeta(payload: 0, meta: 0)
@@ -347,6 +358,10 @@ struct LintTests {
         }
         """)
         _ = try fx.write(file: "Sources/Blade/Tools/Handlers.swift", """
+        func makeResultWithMeta(payload: Int, meta: Int) -> Int {
+            _ = appendMeta("body", "_meta: {}")
+            return payload
+        }
         struct MatchHandler {
             func handle() async -> Int { return makeResultWithMeta(payload: 0, meta: 0) }
         }
@@ -464,6 +479,10 @@ struct LintTests {
         let fx = try BladeFixture()
         defer { fx.cleanup() }
         _ = try fx.write(file: "Sources/Blade/Server.swift", """
+        func makeResultWithMeta(payload: Int, meta: Int) -> Int {
+            _ = appendMeta("body", "_meta: {}")
+            return payload
+        }
         struct Server {
             @mcp.tool(name: "syncthing_thing")
             func anyFunctionName() async -> Int {
@@ -527,6 +546,10 @@ struct LintTests {
         }
         """)
         _ = try fx.write(file: "Sources/Blade/Tools/OkHandler.swift", """
+        func makeResultWithMeta(payload: Int, meta: Int) -> Int {
+            _ = appendMeta("body", "_meta: {}")
+            return payload
+        }
         struct OkHandler {
             func handle() async -> Int { return makeResultWithMeta(payload: 0, meta: 0) }
         }
@@ -540,11 +563,168 @@ struct LintTests {
     }
 
     // Public constants are exported and stable
-    @Test("Public constants exported")
+    @Test("Public constants exported — appendMeta is the SOLE canonical emit (AUD-04-13)")
     func publicConstants() {
         #expect(lintRuleID == "S-AUD-001")
-        #expect(canonicalEmitNames.contains("appendMeta"))
-        #expect(canonicalEmitNames.contains("makeResultWithMeta"))
+        #expect(canonicalEmitNames == ["appendMeta"])
+        // makeResultWithMeta bare-name trust removed in v0.4.0 — it is a
+        // per-blade wrapper, not a library symbol.
+        #expect(!canonicalEmitNames.contains("makeResultWithMeta"))
         #expect(maxResolutionDepth == 3)
+    }
+
+    // MARK: - AUD-04-13 — wrapper body resolution + tri-state emission
+
+    // (a) blade-local makeResultWithMeta free function whose body calls
+    // appendMeta → structured match, resolved via the wrapper path (the
+    // name itself is no longer trusted).
+    @Test("A13a — blade-local makeResultWithMeta calling appendMeta → match via body resolution")
+    func aud0413a_wrapperResolvedByBody() throws {
+        let fx = try BladeFixture()
+        defer { fx.cleanup() }
+        _ = try fx.write(file: "Sources/Blade/ToolRegistry.swift", """
+        struct Registry {
+            let honest: HonestHandler = HonestHandler()
+            func handleCall(name: String) async -> Int {
+                switch name {
+                case "blade_honest":
+                    return await honest.handle()
+                default: return 0
+                }
+            }
+        }
+        """)
+        _ = try fx.write(file: "Sources/Blade/Tools/HonestHandler.swift", """
+        func makeResultWithMeta(payload: String, metaLine: String) -> String {
+            return appendMeta(payload, metaLine)
+        }
+        struct HonestHandler {
+            func handle() async -> Int {
+                _ = makeResultWithMeta(payload: "body", metaLine: "_meta: {}")
+                return 0
+            }
+        }
+        """)
+        let result = lintBlade(
+            bladeSourceRoot: fx.root,
+            catalogEntry: catalog("blade-a13a", [("blade_honest", "structured")])
+        )
+        let verdict = try #require(result.tools["blade_honest"])
+        #expect(verdict.auditSurface.result == "match", Comment(rawValue: verdict.auditSurface.detail))
+        #expect(verdict.auditSurface.actual == "structured")
+    }
+
+    // (b) THE AUD-04-13 regression case: a drifted makeResultWithMeta
+    // that never calls appendMeta. Under v0.3.0's bare-name trust this
+    // linted "structured" (match); it must now be over-declared.
+    @Test("A13b — drifted makeResultWithMeta NOT calling appendMeta → over-declared (regression)")
+    func aud0413b_driftedWrapperOverDeclared() throws {
+        let fx = try BladeFixture()
+        defer { fx.cleanup() }
+        _ = try fx.write(file: "Sources/Blade/ToolRegistry.swift", """
+        struct Registry {
+            let drifted: DriftedHandler = DriftedHandler()
+            func handleCall(name: String) async -> Int {
+                switch name {
+                case "blade_drifted":
+                    return await drifted.handle()
+                default: return 0
+                }
+            }
+        }
+        """)
+        _ = try fx.write(file: "Sources/Blade/Tools/DriftedHandler.swift", """
+        func makeResultWithMeta(payload: String, metaLine: String) -> String {
+            // Drifted wrapper — returns the bare payload, no envelope.
+            return payload
+        }
+        struct DriftedHandler {
+            func handle() async -> Int {
+                _ = makeResultWithMeta(payload: "body", metaLine: "_meta: {}")
+                return 0
+            }
+        }
+        """)
+        let result = lintBlade(
+            bladeSourceRoot: fx.root,
+            catalogEntry: catalog("blade-a13b", [("blade_drifted", "structured")])
+        )
+        let verdict = try #require(result.tools["blade_drifted"])
+        #expect(verdict.auditSurface.result == "over-declared")
+        #expect(verdict.auditSurface.actual == "minimal")
+    }
+
+    // (c) switch-dispatch registration whose handler type is not defined
+    // anywhere in the tree → indeterminate (resolution failure is not
+    // proof of non-emission), NOT over-declared.
+    @Test("A13c — handler type unresolvable → indeterminate, not over-declared")
+    func aud0413c_unresolvableHandlerIndeterminate() throws {
+        let fx = try BladeFixture()
+        defer { fx.cleanup() }
+        _ = try fx.write(file: "Sources/Blade/ToolRegistry.swift", """
+        struct Registry {
+            let ghost: GhostHandler = GhostHandler()
+            func handleCall(name: String) async -> Int {
+                switch name {
+                case "blade_ghost":
+                    return await ghost.handle()
+                default: return 0
+                }
+            }
+        }
+        """)
+        // Note: GhostHandler is deliberately NOT defined in any fixture file.
+        let result = lintBlade(
+            bladeSourceRoot: fx.root,
+            catalogEntry: catalog("blade-a13c", [("blade_ghost", "structured")])
+        )
+        let verdict = try #require(result.tools["blade_ghost"])
+        #expect(verdict.auditSurface.result == "indeterminate")
+        #expect(verdict.auditSurface.actual == "indeterminate")
+        #expect(verdict.auditSurface.detail.contains("could not be statically resolved"))
+        #expect(result.summary.indeterminateCount == 1)
+        #expect(result.summary.overDeclaredCount == 0)
+    }
+
+    // (d) wrapper that is a static method on a utility type calling
+    // appendMeta → match via the typeMethodsIndex fallback.
+    @Test("A13d — static-method wrapper on a utility type → match via typeMethodsIndex fallback")
+    func aud0413d_staticMethodWrapper() throws {
+        let fx = try BladeFixture()
+        defer { fx.cleanup() }
+        _ = try fx.write(file: "Sources/Blade/ToolRegistry.swift", """
+        struct Registry {
+            let typed: TypedHandler = TypedHandler()
+            func handleCall(name: String) async -> Int {
+                switch name {
+                case "blade_typed":
+                    return await typed.handle()
+                default: return 0
+                }
+            }
+        }
+        """)
+        _ = try fx.write(file: "Sources/Blade/Tools/ResultKit.swift", """
+        enum ResultKit {
+            static func finishWithMeta(_ payload: String, _ metaLine: String) -> String {
+                return appendMeta(payload, metaLine)
+            }
+        }
+        """)
+        _ = try fx.write(file: "Sources/Blade/Tools/TypedHandler.swift", """
+        struct TypedHandler {
+            func handle() async -> Int {
+                _ = ResultKit.finishWithMeta("body", "_meta: {}")
+                return 0
+            }
+        }
+        """)
+        let result = lintBlade(
+            bladeSourceRoot: fx.root,
+            catalogEntry: catalog("blade-a13d", [("blade_typed", "structured")])
+        )
+        let verdict = try #require(result.tools["blade_typed"])
+        #expect(verdict.auditSurface.result == "match", Comment(rawValue: verdict.auditSurface.detail))
+        #expect(verdict.auditSurface.actual == "structured")
     }
 }

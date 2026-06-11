@@ -33,14 +33,23 @@
 //      registration with a trailing closure. The closure body is the
 //      emission scan target.
 //
-// Canonical emit names: ``appendMeta`` (the low-level joiner in
-// ``Encoder.swift``) and ``makeResultWithMeta`` (the high-level wrapper
-// in consumer blades that itself calls ``appendMeta``). Either one in the
-// emission graph satisfies S-AUD-001.
+// Canonical emit names: ``appendMeta`` ONLY (the low-level joiner in
+// ``Encoder.swift``) — v0.4.0 / AUD-04-13. ``makeResultWithMeta`` was
+// removed from the trusted set: it is a per-blade hand-rolled wrapper,
+// not a symbol this library defines, and trusting it by bare name meant
+// a drifted wrapper that never calls ``appendMeta`` still linted
+// "structured" — the exact over-declaration S-AUD-001 exists to catch.
+// A blade's ``makeResultWithMeta`` (or any other wrapper, free function
+// or type method) now satisfies the lint only when the resolver finds
+// its actual body and that body transitively calls ``appendMeta``
+// (the wrapper-resolution path in ``functionIsCanonical``).
 //
 // Resolution depth is capped at ``maxResolutionDepth`` hops to keep the
 // lint tractable and deterministic — deeper indirection becomes
-// ``indeterminate`` rather than guessed.
+// ``indeterminate`` rather than guessed. Likewise, a registration whose
+// handler body cannot be statically resolved (handler property type or
+// method missing from the parsed tree) is ``indeterminate`` — a
+// resolution failure is not proof of non-emission.
 //
 // JSON output shape is byte-identical to the Python sibling's
 // ``LintResult.to_dict()`` rendered via ``json.dumps(..., sort_keys=True,
@@ -68,18 +77,27 @@ import SwiftSyntax
 public let lintRuleID = "S-AUD-001"
 
 /// Canonical emit names whose call inside a tool-handler body counts as
-/// "structured" emission. Either function satisfies S-AUD-001; consumer
-/// blades typically call the high-level ``makeResultWithMeta`` which
-/// itself calls ``appendMeta``.
-public let canonicalEmitNames: Set<String> = ["appendMeta", "makeResultWithMeta"]
+/// "structured" emission — ``appendMeta`` only.
+///
+/// ``makeResultWithMeta`` was REMOVED in v0.4.0 (AUD-04-13): it is a
+/// per-blade hand-rolled wrapper, not a library symbol, and bare-name
+/// trust let a drifted wrapper that never calls ``appendMeta`` lint
+/// "structured". A blade's ``makeResultWithMeta`` (or any wrapper) now
+/// satisfies the lint only when the resolver finds its actual body and
+/// that body transitively calls ``appendMeta`` — the existing
+/// wrapper-resolution path (``functionIsCanonical``, including the
+/// cross-module ``typeMethodsIndex`` fallback for static/instance-method
+/// wrappers) provides this.
+public let canonicalEmitNames: Set<String> = ["appendMeta"]
 
 /// Maximum number of wrapper-function hops the resolver will follow when
 /// deciding whether an in-blade identifier transitively reaches a
 /// canonical emit name. Three hops handles the common patterns:
 ///   1. direct call: handler body → ``appendMeta``
-///   2. wrapper-in-blade: handler body → ``makeResultWithMeta`` →
-///      ``appendMeta``
-///   3. one extra hop: handler body → custom wrapper → ``makeResultWithMeta``
+///   2. wrapper-in-blade: handler body → blade-local
+///      ``makeResultWithMeta`` (resolved by body, not name) → ``appendMeta``
+///   3. one extra hop: handler body → custom wrapper → blade-local
+///      ``makeResultWithMeta`` → ``appendMeta``
 public let maxResolutionDepth = 3
 
 // MARK: - Result types
@@ -294,8 +312,24 @@ public func lintBlade(
                 )
             )
         } else if let registration = registry[toolName] {
-            let emits = resolver.bodyEmits(registration: registration)
-            verdict = verdictForDeclared(declared, emits: emits)
+            if let emits = resolver.bodyEmits(registration: registration) {
+                verdict = verdictForDeclared(declared, emits: emits)
+            } else {
+                // Resolution failure, NOT proof of non-emission
+                // (AUD-04-13): do not report over-declared when the
+                // lint simply could not see the body.
+                verdict = AuditSurfaceVerdict(
+                    declared: declared,
+                    actual: "indeterminate",
+                    result: "indeterminate",
+                    detail: (
+                        "tool registration matched but the handler body "
+                        + "could not be statically resolved (handler "
+                        + "property type or method not found in the parsed "
+                        + "tree) — emission status unknown."
+                    )
+                )
+            }
         } else {
             verdict = AuditSurfaceVerdict(
                 declared: declared,
@@ -338,6 +372,10 @@ public func lintBlade(
 
 // MARK: - Verdict construction
 
+/// Construct a verdict from a CONCRETE emission decision. Callers must
+/// only invoke this with a genuinely-inspected `Bool` — an unresolvable
+/// handler body (`bodyEmits` → nil) is handled upstream as
+/// `indeterminate` and never reaches here (AUD-04-13).
 private func verdictForDeclared(_ declared: String, emits: Bool) -> AuditSurfaceVerdict {
     let actual = emits ? "structured" : "minimal"
     if declared == "structured" {
@@ -347,9 +385,9 @@ private func verdictForDeclared(_ declared: String, emits: Bool) -> AuditSurface
                 actual: "structured",
                 result: "match",
                 detail: (
-                    "tool handler body calls a canonical emit (appendMeta or "
-                    + "makeResultWithMeta), directly or via a resolved "
-                    + "wrapper / re-export."
+                    "tool handler body calls the canonical emit (appendMeta), "
+                    + "directly or via a wrapper whose resolved body "
+                    + "transitively reaches it."
                 )
             )
         }
@@ -545,7 +583,16 @@ final class SourceResolver {
 
     /// Top-level emission decision: does this registration's target body
     /// transitively reach a canonical emit name?
-    func bodyEmits(registration: ToolRegistration) -> Bool {
+    ///
+    /// Tri-state (AUD-04-13):
+    ///   - `true` / `false` — a genuinely-inspected body does / does not
+    ///     reach a canonical emit.
+    ///   - `nil` — resolution failure: for `.handlerCall`, the handler
+    ///     property's type could not be resolved, the type's method was
+    ///     not found in the parsed tree, or the method has no body. These
+    ///     are NOT proof of non-emission; the caller must surface them as
+    ///     `indeterminate`, never `over-declared`.
+    func bodyEmits(registration: ToolRegistration) -> Bool? {
         switch registration.kind {
         case .inlineBody(let body, let key):
             return blockCallsCanonical(body: body, moduleKey: key, depth: 0)
@@ -553,13 +600,13 @@ final class SourceResolver {
             // Resolve handler property → declared type.
             guard let module = modules[key],
                   let typeName = resolveHandlerType(name: handlerName, in: module) else {
-                return false
+                return nil
             }
             guard let methods = typeMethodsIndex[typeName],
                   let method = methods[methodName] else {
-                return false
+                return nil
             }
-            guard let body = method.body else { return false }
+            guard let body = method.body else { return nil }
             return blockCallsCanonical(body: body, moduleKey: key, depth: 0)
         }
     }
@@ -593,9 +640,16 @@ final class SourceResolver {
         return module.propertyTypes[name]
     }
 
-    /// Memoised: is the named free function in this module a canonical
+    /// Memoised: is the named function in this module a canonical
     /// wrapper? A wrapper is canonical if its body calls a canonical
     /// emit (recursively, up to the depth cap).
+    ///
+    /// Resolution order: same-module free function → cross-module free
+    /// function → cross-module ``typeMethodsIndex`` (a wrapper may be a
+    /// static or instance method on a utility type, e.g.
+    /// ``ResultKit.makeResultWithMeta`` — AUD-04-13 extension; without
+    /// this fallback, method-shaped wrappers would silently lint as
+    /// non-canonical).
     private func functionIsCanonical(
         name: String,
         moduleKey: ModuleKey,
@@ -612,6 +666,19 @@ final class SourceResolver {
         if fn == nil {
             for (_, info) in modules {
                 if let candidate = info.freeFunctions[name] {
+                    fn = candidate
+                    break
+                }
+            }
+        }
+        if fn == nil {
+            // Cross-module type-method fallback: any type's method with
+            // this name. Deterministic-enough for the lint's granularity —
+            // the catalog is the authority on which tools exist; here we
+            // only need to know whether SOME in-tree body by this name
+            // reaches the canonical emit.
+            for (_, methods) in typeMethodsIndex {
+                if let candidate = methods[name] {
                     fn = candidate
                     break
                 }

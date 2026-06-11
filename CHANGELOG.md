@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-12
+
+DD-386 helper-lib hardening — locks the Swift sibling to the v0.4.0 cross-language contract just shipped by the Python canonical [`stallari-mcp-helpers`](https://pypi.org/project/stallari-mcp-helpers/) and the TypeScript sibling. Fixes AUD-04-12 (11-key envelope + wrong collation), AUD-04-13 (lint bare-name trust + false over-declared), and adds the AUD-04-08 canonical HTTP transport-policy surface.
+
+> **Parity correction:** v0.3.0's claimed cross-language parity was inaccurate — this package emitted an 11-key envelope (missing `domain_hints`) and sorted `filtered_by` with Swift's default Unicode-canonical `String <` rather than the locked raw code-point collation. Byte parity across the trio holds from v0.4.0 onward.
+
+### Added
+
+- `MetaEnvelope.domainHints: [String: String]?` (wire: `domain_hints`) — 12-key parity with the Python/TS sisters (AUD-04-12). Omit-when-nil-or-empty (same discipline as `error_notes`). When emitted, object keys are sorted by raw Unicode code point. Locked 12-key emission order now ends `..., error_notes, domain_hints`.
+- `codePointLess(_:_:)` — public locked-collation comparator: lexicographic over raw Unicode scalar values, no normalisation (Python `sorted()` semantics). Swift's default `String <` applies Unicode-canonical ordering, which diverges from the locked collation — `formatMetaLine` now sorts `filtered_by` and `domain_hints` keys with this comparator. Public so blades can reuse it.
+- `Sources/MCPHelpers/Transport.swift` — canonical HTTP transport policy (AUD-04-08), sister to the Python/TS v0.4.0 transport modules. Token-absent HTTP REFUSES to serve (never warn-and-serve unauthenticated); wildcard binds (`0.0.0.0`, `::`, `[::]`, empty) never permitted; non-loopback binds require `{PREFIX}_MCP_ALLOW_NONLOOPBACK` exactly `"true"`. Surface: `TransportPolicyError` (operator-actionable descriptions, never containing token material), `HTTPTransportConfig`, `strictEnvBool(_:)`, `resolveHTTPTransport(envPrefix:defaultPort:environment:tokenVariable:)`, and `validateBearer(authorizationHeader:expectedToken:)` (case-insensitive `Bearer` scheme, constant-time SHA-256-digest compare; callers must enforce it on WebSocket upgrades too — AUD-04-31).
+- `Tests/MCPHelpersTests/ParityGoldenTests.swift` — golden parity fixture asserting `formatMetaLine` renders the exact byte-locked v0.4.0 wire strings (identical literals exist in the Python + TS sibling repos), including the collation-hostile `U+FFFD` vs `U+1F600` `filtered_by` pair and non-ASCII `domain_hints` keys.
+- `Tests/MCPHelpersTests/TransportTests.swift` — full refusal matrix + bearer-validation suite.
+
+### Changed
+
+- **Lint (S-AUD-001, AUD-04-13):** `canonicalEmitNames` reduced to `["appendMeta"]`. `makeResultWithMeta` is a per-blade hand-rolled wrapper, not a library symbol — trusting it by bare name let a drifted wrapper that never calls `appendMeta` lint "structured" (the exact over-declaration S-AUD-001 exists to catch). A blade's `makeResultWithMeta` (or any wrapper) now satisfies the lint only when the resolver finds its actual body and that body transitively calls `appendMeta`.
+- **Lint wrapper resolution:** `functionIsCanonical` falls back to the cross-module `typeMethodsIndex` when no free function matches — wrappers that are static/instance methods on utility types now resolve.
+- **Lint tri-state emission decision:** `bodyEmits(registration:)` returns `Bool?`. For switch-dispatch registrations, an unresolvable handler property type, missing method, or bodyless method returns `nil` (resolution failure, not proof of non-emission) and surfaces as an `indeterminate` verdict with an actionable detail — previously these produced a false `over-declared`.
+- `MCPHelpers.version` bumped to `"0.4.0"`.
+
+### Notes
+
+- `formatMetaLine` output is byte-identical to v0.3.0 for envelopes without `domainHints` whose `filteredBy` elements are ASCII-only (the overwhelmingly common case) — the collation change only affects non-ASCII/collation-hostile inputs, which is precisely where v0.3.0 diverged from the sisters.
+
 ## [0.3.0] - 2026-05-24
 
 DD-338 Phase D.1 Swift sibling — additive extension of `MetaEnvelope` for write-tier audit fields. Sister to the Python sibling [`stallari-mcp-helpers` 0.3.0](https://pypi.org/project/stallari-mcp-helpers/) and the TypeScript sibling at the same JSON output shape (byte-parity confirmed via shared kitchen-sink fixture).
