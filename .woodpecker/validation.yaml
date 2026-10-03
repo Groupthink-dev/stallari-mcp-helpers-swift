@@ -1,0 +1,36 @@
+# Validation for stallari-mcp-helpers (Swift) on the meridian Mac lane
+# (Stallari/mcp-helpers-swift#2; infra/iac ADR-0047 § 4 and #611). The
+# mac-pool-reconciler mints one agent per workflow inside a Tart macOS guest on
+# the shared Mac fleet and runs it with the local backend, so `image` names the
+# shell the commands run in, not a container, and the clone step uses the
+# plugin-git the reconciler ships on PATH. Non-publish: the VM requests
+# general-macos=1 and never the signing slot.
+#
+# Credential-free: the steps read only the clone and the public swift-syntax
+# package on GitHub. The guest toolchain is the image's Xcode; Package.swift
+# needs swift-tools-version 6.0 or later, which the Tahoe Xcode image carries.
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+labels:
+  platform: darwin/arm64
+  backend: local
+  estate: meridian
+
+steps:
+  - name: swift
+    image: bash
+    commands:
+      - sw_vers
+      - swift --version
+      - swift package resolve
+      - swift build
+      - swift test --enable-code-coverage
+      - |
+        xcrun llvm-cov report \
+          .build/debug/stallari-mcp-helpersPackageTests.xctest/Contents/MacOS/stallari-mcp-helpersPackageTests \
+          -instr-profile .build/debug/codecov/default.profdata \
+          -ignore-filename-regex='\.build|Tests' \
+          || echo "(coverage report best-effort)"

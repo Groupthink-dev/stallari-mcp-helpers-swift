@@ -12,8 +12,8 @@ Stallari is an agentic personal-knowledge-management platform. It runs [MCP serv
 
 | Language | Package | Source |
 |---|---|---|
-| **Python** | [`stallari-mcp-helpers` on PyPI](https://pypi.org/project/stallari-mcp-helpers/) | [`stallari-mcp-helpers`](https://github.com/Groupthink-dev/stallari-mcp-helpers) |
-| **TypeScript** | [`stallari-mcp-helpers` on npm](https://www.npmjs.com/package/stallari-mcp-helpers) | [`stallari-mcp-helpers-ts`](https://github.com/Groupthink-dev/stallari-mcp-helpers-ts) |
+| **Python** | [`stallari-mcp-helpers` on PyPI](https://pypi.org/project/stallari-mcp-helpers/) | [`stallari-mcp-helpers`](https://git.groupthink.asia/Stallari/mcp-helpers) |
+| **TypeScript** | [`stallari-mcp-helpers` on npm](https://www.npmjs.com/package/stallari-mcp-helpers) | [`stallari-mcp-helpers-ts`](https://git.groupthink.asia/Stallari/mcp-helpers-ts) |
 | **Swift** | `MCPHelpers` via Swift Package Manager | this repo |
 
 All three packages stay in lockstep on the wire shape — `meta_envelope(...)` in Python, `formatMetaLine(...)` in TypeScript, and `formatMetaLine(...)` in Swift all emit byte-equivalent `_meta` envelopes for the same input.
@@ -45,7 +45,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Groupthink-dev/stallari-mcp-helpers-swift", from: "0.1.0"),
+    .package(url: "https://git.groupthink.asia/Stallari/mcp-helpers-swift", from: "0.1.0"),
 ],
 targets: [
     .target(
@@ -190,4 +190,4 @@ MIT. See `LICENSE`.
 
 ## Contributing
 
-This is internal Stallari plumbing during the `0.x` series — issues + PRs accepted but the API surface is still settling. Submit issues at the [GitHub tracker](https://github.com/Groupthink-dev/stallari-mcp-helpers-swift/issues).
+This is internal Stallari plumbing during the `0.x` series — issues + PRs accepted but the API surface is still settling. Submit issues at the [Forgejo tracker](https://git.groupthink.asia/Stallari/mcp-helpers-swift/issues).
